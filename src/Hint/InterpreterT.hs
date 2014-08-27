@@ -1,5 +1,6 @@
 module Hint.InterpreterT (
-    InterpreterT, Interpreter, runInterpreter, runInterpreterWithArgs,
+    InterpreterT, Interpreter, runInterpreter, runInterpreterWithArgs, 
+    runInterpreterWithTopDirAndArgs,
     MultipleInstancesNotAllowed(..)
 )
 
@@ -42,10 +43,11 @@ newtype InterpreterT m a = InterpreterT{
     deriving (Functor, Monad, MonadIO, MonadThrow,MonadCatch,MonadMask)
 
 execute :: (MonadIO m, MonadMask m, Functor m)
-        => InterpreterSession
+        => Maybe FilePath 
+        -> InterpreterSession
         -> InterpreterT m a
         -> m (Either InterpreterError a)
-execute s = runErrorT . flip runReaderT s . unInterpreterT
+execute _ s = runErrorT . flip runReaderT s . unInterpreterT
 
 instance MonadTrans InterpreterT where
     lift = InterpreterT . lift . lift
@@ -66,13 +68,14 @@ newtype InterpreterT m a = InterpreterT{
     deriving (Functor, Monad, MonadIO, MonadThrow, MonadCatch, MonadMask)
 
 execute :: (MonadIO m, MonadMask m, Functor m)
-        => InterpreterSession
+        => Maybe FilePath 
+        -> InterpreterSession
         -> InterpreterT m a
         -> m (Either InterpreterError a)
-execute s = try
-          . GHC.runGhcT (Just GHC.Paths.libdir)
-          . flip runReaderT s
-          . unInterpreterT
+execute mb_top_dir s = try
+                     . GHC.runGhcT mb_top_dir
+                     . flip runReaderT s
+                     . unInterpreterT
 
 
 instance MonadTrans InterpreterT where
@@ -158,15 +161,25 @@ runInterpreterWithArgs :: (MonadIO m, MonadMask m, Functor m)
                           => [String]
                           -> InterpreterT m a
                           -> m (Either InterpreterError a)
-runInterpreterWithArgs args action =
+runInterpreterWithArgs = runInterpreterWithTopDirAndArgs (Just GHC.Paths.libdir)
+
+-- | Executes the interpreter, setting GHC top dir and args passed in as 
+-- though they were command-line args. Returns @Left InterpreterError@ 
+-- in case of error.
+runInterpreterWithTopDirAndArgs :: (MonadIO m, MonadMask m, Functor m)
+                                => Maybe FilePath
+                                -> [String]
+                                -> InterpreterT m a
+                                -> m (Either InterpreterError a)
+runInterpreterWithTopDirAndArgs mb_top_dir args action =
   ifInterpreterNotRunning $
     do s <- newInterpreterSession `MC.catch` rethrowGhcException
        -- SH.protectHandlers $ execute s (initialize args >> action)
-       execute s (initialize args >> action `finally` cleanSession)
+       execute mb_top_dir s (initialize args >> action `finally` cleanSession)
     where rethrowGhcException   = throwM . GhcException . showGhcEx
 #if __GLASGOW_HASKELL__ < 610
           newInterpreterSession =  do s <- liftIO $
-                                             Compat.newSession GHC.Paths.libdir
+                                             Compat.newSession $ fromJust mb_top_dir
                                       newSessionData s
           cleanSession = cleanPhantomModules -- clean ghc session, too?
 #else
